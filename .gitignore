@@ -10,6 +10,10 @@ venv/
 .DS_Store
 Thumbs.db
 
+# uv
+.venv/
+uv.lock
+
 # Project data (user's real data)
 input/*
 output/*

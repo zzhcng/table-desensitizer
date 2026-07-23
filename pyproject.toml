@@ -1,0 +1,10 @@
+[project]
+name = "table-desensitizer"
+version = "1.0.0"
+description = "批量 Excel 表格脱敏工具 — 员工号/姓名/组织等字段的确定性脱敏"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openpyxl>=3.1.0",
+    "pyyaml>=6.0",
+]
