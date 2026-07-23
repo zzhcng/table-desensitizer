@@ -5,6 +5,8 @@ description = "批量 Excel 表格脱敏工具 — 员工号/姓名/组织等字
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "lxml>=6.1.1",
     "openpyxl>=3.1.0",
+    "python-calamine>=0.8.2",
     "pyyaml>=6.0",
 ]

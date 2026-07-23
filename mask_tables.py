@@ -340,33 +340,149 @@ def get_cell_value(cell):
     return str(v)
 
 
+def _read_with_calamine(filepath):
+    """
+    使用 python-calamine（Rust 实现）读取 xlsx 数据。
+    完全不解析样式，对 WPS 损坏文件最友好。
+    返回 {sheet_name: [rows]}，每行是单元格值的列表。
+    """
+    import python_calamine
+
+    cwb = python_calamine.load_workbook(filepath)
+    result = {}
+    for sheet_name in cwb.sheet_names:
+        sheet = cwb.get_sheet_by_name(sheet_name)
+        rows = list(sheet.iter_rows())
+        result[sheet_name] = rows
+    return result
+
+
+def _rebuild_openpyxl(data_dict):
+    """
+    从 calamine 读取的数据重建 openpyxl Workbook。
+    保留表头和数据，不保留原样式。
+    """
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    default_ws = wb.active
+    first = True
+    for sheet_name, rows in data_dict.items():
+        if first:
+            ws = default_ws
+            ws.title = sheet_name
+            first = False
+        else:
+            ws = wb.create_sheet(title=sheet_name)
+        for row in rows:
+            ws.append(row)
+    return wb
+
+
 def _repair_xlsx_styles(filepath):
     """
-    修复损坏的 styles.xml：替换为最小合法样式表。
-    使用 BytesIO 避免 Windows 文件锁问题。
-    返回 BytesIO 对象，可直接传给 load_workbook。
+    修复损坏的 styles.xml。
+    1. 尝试保留原样式内容（用 lxml 容错解析）
+    2. 若解析失败，生成一个包含 50 组默认条目的样式表，
+       确保原文件任何样式索引都不越界
+    返回 BytesIO 对象。
     """
     import io
     import zipfile
+    import re
 
     buf = io.BytesIO()
-    MINIMAL_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="2">
-    <fill><patternFill patternType="none"/></fill>
-    <fill><patternFill patternType="gray125"/></fill>
-  </fills>
-  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
-</styleSheet>"""
+
+    # 尝试从原文件提取并保留样式信息
+    original_styles = None
+    try:
+        with zipfile.ZipFile(filepath, 'r') as z:
+            if 'xl/styles.xml' in z.namelist():
+                original_styles = z.read('xl/styles.xml')
+    except Exception:
+        pass
+
+    if original_styles is not None:
+        # 尝试用 lxml 容错解析原样式（处理 WPS 非标准输出）
+        try:
+            from lxml import etree
+            root = etree.fromstring(original_styles)
+            ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+            # 提取关键元素数量
+            fonts_n = max(len(root.findall(f'{ns}fonts/{ns}font')), 1)
+            fills_n = max(len(root.findall(f'{ns}fills/{ns}fill')), 2)
+            borders_n = max(len(root.findall(f'{ns}borders/{ns}border')), 1)
+            xfs_n = max(len(root.findall(f'{ns}cellXfs/{ns}xf')), 1)
+            # 重写 count 属性（WPS 可能写错）
+            for tag, count in [('fonts', fonts_n), ('fills', fills_n),
+                               ('borders', borders_n), ('cellStyleXfs', 1),
+                               ('cellXfs', xfs_n)]:
+                el = root.find(f'{ns}{tag}')
+                if el is not None:
+                    el.set('count', str(count))
+            repaired = etree.tostring(root, xml_declaration=True, encoding='UTF-8',
+                                      standalone=True)
+            with zipfile.ZipFile(filepath, 'r') as zin:
+                with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+                    for item in zin.infolist():
+                        if item.filename == 'xl/styles.xml':
+                            zout.writestr(item, repaired)
+                        else:
+                            zout.writestr(item, zin.read(item.filename))
+            buf.seek(0)
+            return buf
+        except Exception:
+            pass  # lxml 也失败，走 fallback
+
+    # ── Fallback：生成 50 组默认样式 ──────────────────────────
+    N = 50
+    parts = []
+    parts.append('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>')
+    parts.append('<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">')
+
+    # fonts
+    parts.append(f'<fonts count="{N}">')
+    for _ in range(N):
+        parts.append('<font><sz val="11"/><name val="SimSun"/></font>')
+    parts.append('</fonts>')
+
+    # fills
+    parts.append(f'<fills count="{N}">')
+    for i in range(N):
+        if i == 0:
+            parts.append('<fill><patternFill patternType="none"/></fill>')
+        else:
+            parts.append('<fill><patternFill patternType="gray125"/></fill>')
+    parts.append('</fills>')
+
+    # borders
+    parts.append(f'<borders count="{N}">')
+    for _ in range(N):
+        parts.append('<border><left/><right/><top/><bottom/><diagonal/></border>')
+    parts.append('</borders>')
+
+    # cellStyleXfs
+    parts.append(f'<cellStyleXfs count="1">')
+    parts.append('<xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>')
+    parts.append('</cellStyleXfs>')
+
+    # cellXfs — 重要：每项引用不同索引覆盖所有组合
+    parts.append(f'<cellXfs count="{N}">')
+    for i in range(N):
+        fid = min(i, N - 1)
+        gid = min(i, N - 1)
+        bid = min(i, N - 1)
+        parts.append(f'<xf numFmtId="0" fontId="{fid}" fillId="{gid}" borderId="{bid}" xfId="0"/>')
+    parts.append('</cellXfs>')
+
+    parts.append('</styleSheet>')
+    fallback_styles = '\n'.join(parts).encode('utf-8')
 
     with zipfile.ZipFile(filepath, 'r') as zin:
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 if item.filename == 'xl/styles.xml':
-                    zout.writestr(item, MINIMAL_STYLES)
+                    zout.writestr(item, fallback_styles)
                 else:
                     zout.writestr(item, zin.read(item.filename))
     buf.seek(0)
@@ -406,7 +522,20 @@ def _safe_load_workbook(filepath):
         return wb
     except Exception as e:
         last_error = e
-        raise last_error
+        print(f"     ⚠ 样式修复失败: {e}")
+
+    # 最终兜底：用 python-calamine 直接读数据，重建 workbook
+    print(f"     📦 尝试 python-calamine 直接读取...")
+    try:
+        data = _read_with_calamine(filepath)
+        wb = _rebuild_openpyxl(data)
+        print(f"     ✅ calamine 读取成功 ({len(data)} 个工作表)")
+        return wb
+    except Exception as e:
+        raise Exception(
+            f"openpyxl 全部策略失败 + calamine 也失败: {e}\n"
+            f"  文件可能已损坏，请尝试用 Excel/WPS 打开后另存为再重试。"
+        )
 
 
 def process_file(filepath, config, input_dir=None):
