@@ -1,0 +1,92 @@
+# 表格脱敏配置
+# =============
+# 修改此文件以适配你的表格列名和脱敏策略
+
+# 输入目录：存放原始表格的位置
+input_dir: "./input"
+
+# 输出目录：脱敏后的表格保存位置
+output_dir: "./output"
+
+# 输出文件后缀：原文件名附加后缀避免覆盖
+suffix: "_masked"
+
+# 脱敏规则列表
+# 每条规则包含:
+#   column   - 列名（支持模糊匹配，建议使用精确列名）
+#   strategy - 脱敏策略（见下方说明）
+#   options  - 策略参数（可选，因策略而异）
+rules:
+
+  # ======== 员工号/工号 ========
+  - column: "员工号"
+    strategy: "partial_mask"
+    options:
+      prefix_len: 1    # 保留前 N 位
+      suffix_len: 3    # 保留后 N 位
+      # 例: E2024001 → E****001
+
+  # 如果上面列名匹配不到，可以用备用列名
+  - column: "工号"
+    strategy: "partial_mask"
+    options:
+      prefix_len: 1
+      suffix_len: 3
+
+  # ======== 姓名 ========
+  - column: "姓名"
+    strategy: "fake_chinese_name"
+    # 生成伪中文姓名，同一真实姓名→同一假名
+
+  # ======== 组织/部门 ========
+  - column: "组织"
+    strategy: "generic_org"
+    # 例: "研发中心-后端开发组" → "技术研发-A/运营服务-B"
+
+  - column: "部门"
+    strategy: "generic_org"
+
+  # ======== 其他常见字段示例 ========
+  # 身份证号（保留后4位）
+  # - column: "身份证"
+  #   strategy: "partial_mask"
+  #   options:
+  #     prefix_len: 0
+  #     suffix_len: 4
+
+  # 手机号
+  # - column: "手机"
+  #   strategy: "partial_mask"
+  #   options:
+  #     prefix_len: 3
+  #     suffix_len: 4
+
+  # 哈希脱敏（通用，保留原始唯一性）
+  # - column: "邮箱"
+  #   strategy: "hash"
+  #   options:
+  #     length: 10
+  #     prefix: "u_"
+
+
+# =========================================================================
+# 支持的脱敏策略及参数
+# =========================================================================
+# 
+# 1. partial_mask    部分掩码
+#    参数: prefix_len=N, suffix_len=N, mask_char="*"
+#    例: "E2024001" → "E****001", "张三丰" → "张*丰"
+#
+# 2. fake_chinese_name  伪中文姓名
+#    生成"姓氏+名字"格式的假名，同一真实姓名→同一假名
+#
+# 3. generic_org    通用组织名称
+#    保留原始层级结构，内容替换为通用分类名
+#    例: "研发部/后端组" → "技术研发-A/运营服务-B"
+#
+# 4. hash           哈希脱敏
+#    参数: length=N (截取前N位), prefix="xxx" (可选前缀)
+#    同一原始值→同一哈希值
+#
+# 5. fake_employee_id  伪员工号
+#    保留数字/字母格式特征，内容伪随机生成
