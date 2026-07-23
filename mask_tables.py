@@ -340,15 +340,89 @@ def get_cell_value(cell):
     return str(v)
 
 
+def _repair_xlsx_styles(filepath):
+    """
+    修复损坏的 styles.xml：替换为最小合法样式表。
+    适用于 WPS/非标准工具生成的文件。
+    返回临时文件路径，调用方负责清理。
+    """
+    import shutil
+    import tempfile
+    import zipfile
+
+    fd, tmp = tempfile.mkstemp(suffix='.xlsx')
+    os.close(fd)
+
+    MINIMAL_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+  </fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+</styleSheet>"""
+
+    with zipfile.ZipFile(filepath, 'r') as zin:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if item.filename == 'xl/styles.xml':
+                    zout.writestr(item, MINIMAL_STYLES)
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+    return tmp
+
+
+def _safe_load_workbook(filepath):
+    """
+    多策略安全加载 Excel 文件。
+    某些 WPS/非标准工具生成的文件样式损坏，需要降级加载。
+    """
+    strategies = [
+        ("标准模式", {}),
+        ("仅数据模式", {"data_only": True}),
+        ("无宏模式", {"keep_vba": False}),
+        ("数据+无宏", {"data_only": True, "keep_vba": False}),
+        ("严格模式", {"data_only": True, "keep_vba": False, "rich_text": True}),
+    ]
+    last_error = None
+    for name, kwargs in strategies:
+        try:
+            wb = load_workbook(filepath, **kwargs)
+            if name != "标准模式":
+                print(f"     ⚡ 使用降级加载: {name}")
+            return wb
+        except Exception as e:
+            last_error = e
+            continue
+
+    # 终极手段：修复损坏的 styles.xml
+    print(f"     🔧 尝试修复 styles.xml...")
+    tmp = None
+    try:
+        tmp = _repair_xlsx_styles(filepath)
+        wb = load_workbook(tmp)
+        print(f"     ✅ 样式修复成功")
+        return wb
+    except Exception as e:
+        last_error = e
+        raise last_error
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def process_file(filepath, config, input_dir=None):
     """处理单个 Excel 文件，返回处理行数或 None（出错时）。"""
     rel_path = os.path.relpath(filepath, input_dir) if input_dir else os.path.basename(filepath)
     print(f"\n📄 处理: {rel_path}")
 
     try:
-        wb = load_workbook(filepath)
+        wb = _safe_load_workbook(filepath)
     except Exception as e:
-        print(f"  ❌ 无法打开文件: {e}")
+        print(f"  ❌ 无法打开文件（所有策略均失败）: {e}")
         return None
 
     rules = config.get("rules", [])
