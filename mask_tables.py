@@ -343,16 +343,13 @@ def get_cell_value(cell):
 def _repair_xlsx_styles(filepath):
     """
     修复损坏的 styles.xml：替换为最小合法样式表。
-    适用于 WPS/非标准工具生成的文件。
-    返回临时文件路径，调用方负责清理。
+    使用 BytesIO 避免 Windows 文件锁问题。
+    返回 BytesIO 对象，可直接传给 load_workbook。
     """
-    import shutil
-    import tempfile
+    import io
     import zipfile
 
-    fd, tmp = tempfile.mkstemp(suffix='.xlsx')
-    os.close(fd)
-
+    buf = io.BytesIO()
     MINIMAL_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
@@ -366,13 +363,14 @@ def _repair_xlsx_styles(filepath):
 </styleSheet>"""
 
     with zipfile.ZipFile(filepath, 'r') as zin:
-        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 if item.filename == 'xl/styles.xml':
                     zout.writestr(item, MINIMAL_STYLES)
                 else:
                     zout.writestr(item, zin.read(item.filename))
-    return tmp
+    buf.seek(0)
+    return buf
 
 
 def _safe_load_workbook(filepath):
@@ -400,18 +398,15 @@ def _safe_load_workbook(filepath):
 
     # 终极手段：修复损坏的 styles.xml
     print(f"     🔧 尝试修复 styles.xml...")
-    tmp = None
     try:
-        tmp = _repair_xlsx_styles(filepath)
-        wb = load_workbook(tmp)
+        buf = _repair_xlsx_styles(filepath)
+        wb = load_workbook(buf)
+        buf.close()
         print(f"     ✅ 样式修复成功")
         return wb
     except Exception as e:
         last_error = e
         raise last_error
-    finally:
-        if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
 
 
 def process_file(filepath, config, input_dir=None):
