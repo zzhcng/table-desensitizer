@@ -291,10 +291,10 @@ def get_cell_value(cell):
     return str(v)
 
 
-def process_file(filepath, config):
+def process_file(filepath, config, input_dir=None):
     """处理单个 Excel 文件，返回处理行数或 None（出错时）。"""
-    filename = os.path.basename(filepath)
-    print(f"\n📄 处理: {filename}")
+    rel_path = os.path.relpath(filepath, input_dir) if input_dir else os.path.basename(filepath)
+    print(f"\n📄 处理: {rel_path}")
 
     try:
         wb = load_workbook(filepath)
@@ -350,10 +350,16 @@ def process_file(filepath, config):
         total_rows += row_count
         print(f"     处理行数: {row_count}")
 
-    # 生成输出路径
-    base, ext = os.path.splitext(filename)
+    # 生成输出路径（保留子目录结构）
+    if input_dir:
+        rel_dir = os.path.dirname(rel_path)
+        out_dir = os.path.join(config["output_dir"], rel_dir) if rel_dir else config["output_dir"]
+        os.makedirs(out_dir, exist_ok=True)
+    else:
+        out_dir = config["output_dir"]
+    base, ext = os.path.splitext(os.path.basename(filepath))
     out_name = f"{base}{config.get('suffix', '_masked')}{ext}"
-    out_path = os.path.join(config["output_dir"], out_name)
+    out_path = os.path.join(out_dir, out_name)
 
     wb.save(out_path)
     wb.close()
@@ -375,7 +381,7 @@ def main():
   python mask_tables.py                          # 使用默认配置
   python mask_tables.py --config my_rules.yaml   # 自定义配置
   python mask_tables.py --dry-run                # 只预览不写入
-  python mask_tables.py --input-dir ./机密表格    # 指定输入目录
+  python mask_tables.py --input-dir ./机密表格    # 指定输入目录（递归搜索子目录）
         """,
     )
     parser.add_argument("--config", default="config.yaml",
@@ -422,11 +428,11 @@ def main():
     print(f"  模式:      {'🔍 预览 (dry-run)' if args.dry_run else '⚡ 正式执行'}")
     print("-" * 60)
 
-    # 查找 Excel 文件
+    # 查找 Excel 文件（递归搜索子目录）
     patterns = ["*.xlsx", "*.xls"]
     files = []
     for p in patterns:
-        files.extend(Path(input_dir).glob(p))
+        files.extend(Path(input_dir).rglob(p))
     files = sorted(set(files))  # 去重
 
     if not files:
@@ -436,7 +442,8 @@ def main():
 
     print(f"\n📂 发现 {len(files)} 个文件:")
     for f in files:
-        print(f"   - {f.name}")
+        rel = os.path.relpath(f, input_dir)
+        print(f"   - {rel}")
 
     if args.dry_run:
         print("\n🔍 预览模式结束，未写入任何文件。")
@@ -450,9 +457,9 @@ def main():
     failed_files = []
 
     for f in files:
-        result = process_file(str(f), config)
+        result = process_file(str(f), config, input_dir=input_dir)
         if result is None:
-            failed_files.append(f.name)
+            failed_files.append(os.path.relpath(f, input_dir))
         else:
             rows_total, rows_masked = result
             success_count += 1
