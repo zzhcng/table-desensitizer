@@ -49,6 +49,11 @@ uv run python mask_tables.py --dry-run
 编辑 `config.yaml`，核心是 `rules` 部分：
 
 ```yaml
+# 表头行（默认 1）：
+#   数字 → 精确行号，如 3 表示第 3 行是表头
+#   auto → 自动检测，跳过上方合并标题行
+header_row: 1
+
 rules:
   - column: "员工号"              # 表格中的列名（支持模糊匹配）
     strategy: "partial_mask"     # 脱敏策略

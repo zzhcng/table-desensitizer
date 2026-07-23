@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "input_dir": "./input",
     "output_dir": "./output",
     "suffix": "_masked",
+    "header_row": 1,           # 表头行号（1 起），设为 "auto" 自动检测
     "rules": [
         {"column": "员工号", "strategy": "partial_mask",
          "options": {"prefix_len": 1, "suffix_len": 3}},
@@ -237,29 +238,79 @@ def apply_strategy(value, strategy_name, options=None):
 # 4. Excel 文件处理
 # =========================================================================
 
-def find_column_indices(ws, column_names):
+def _auto_detect_header_row(ws, column_names, max_scan=15):
+    """
+    自动检测表头行。
+    策略：扫描前 max_scan 行，分数最高的行作为表头。
+    计分规则：
+      - +1  每个非空文本单元格
+      - +3  每个匹配配置列名的单元格（精确或子串匹配）
+      - -5  该行全是空（跳过）
+    """
+    best_row = 1
+    best_score = -1
+
+    for row in ws.iter_rows(min_row=1, max_row=min(max_scan, ws.max_row or max_scan),
+                            values_only=False):
+        r = row[0].row
+        text_count = 0
+        match_count = 0
+        for cell in row:
+            v = cell.value
+            if v is None:
+                continue
+            s = str(v).strip()
+            if not s:
+                continue
+            text_count += 1
+            for cn in column_names:
+                if cn in s or s in cn:
+                    match_count += 1
+
+        if text_count == 0:
+            continue  # 空行跳过
+
+        score = text_count + match_count * 3
+        if score > best_score:
+            best_score = score
+            best_row = r
+
+    return best_row
+
+
+def find_column_indices(ws, column_names, header_row=1):
     """
     在 worksheet 中查找匹配的列。
-    支持:
-      - 精确匹配: "员工号"
-      - 子串匹配: "姓名" 匹配 "员工姓名"
-      - 拼音/简写: 暂不支持，用户需通过 config 指定精确列名
+    支持：
+      - header_row 为整数：精确指定表头行
+      - header_row 为 "auto" 或 0：自动检测
+      - 精确匹配："员工号"
+      - 子串匹配："姓名" 匹配 "员工姓名"
     返回: {配置中的列名: (列索引, 匹配的表头)}
     """
+    # 确定表头行号
+    hr = header_row
+    if hr == "auto" or (isinstance(hr, int) and hr < 1):
+        hr = _auto_detect_header_row(ws, column_names)
+        if hr != header_row and hr != 1:
+            print(f"     自动检测表头行: 第 {hr} 行")
+
     headers = {}
-    for row in ws.iter_rows(min_row=1, max_row=1):
+    for row in ws.iter_rows(min_row=hr, max_row=hr):
         for cell in row:
             if cell.value is not None:
                 headers[str(cell.value).strip()] = cell.column
 
+    if not headers:
+        print(f"     表头行（第 {hr} 行）为空，跳过")
+        return {}
+
     result = {}
     used_columns = set()
     for col_name in column_names:
-        # 精确匹配优先
         if col_name in headers:
             col_idx = headers[col_name]
         else:
-            # 模糊匹配：找包含该关键词的表头
             matched = [h for h in headers if col_name in h]
             if len(matched) == 0:
                 print(f"  ⚠ 未找到列 '{col_name}'，跳过")
@@ -269,9 +320,7 @@ def find_column_indices(ws, column_names):
                 continue
             col_idx = headers[matched[0]]
 
-        # 检查是否已被前面的规则占用
         if col_idx in used_columns:
-            # 找到对应的列头名
             header_name = next((h for h, idx in headers.items() if idx == col_idx), str(col_idx))
             print(f"  ⚠ 列 '{header_name}' 已被脱敏跳过（多个规则匹配同一列）")
             continue
@@ -303,6 +352,15 @@ def process_file(filepath, config, input_dir=None):
         return None
 
     rules = config.get("rules", [])
+    header_row = config.get("header_row", 1)
+    # 解析 header_row（支持 "auto" 和整数）
+    if isinstance(header_row, str) and header_row.strip().lower() == "auto":
+        hr_config = "auto"
+    else:
+        try:
+            hr_config = int(header_row)
+        except (ValueError, TypeError):
+            hr_config = 1
     column_names = [r["column"] for r in rules]
     total_masked = 0
     total_rows = 0
@@ -311,7 +369,14 @@ def process_file(filepath, config, input_dir=None):
         sheet_name = ws.title
         print(f"   ↳ 工作表: {sheet_name}")
 
-        col_map = find_column_indices(ws, column_names)
+        # 解析当前工作表的表头行
+        hr = hr_config
+        if hr == "auto":
+            hr = _auto_detect_header_row(ws, column_names)
+            if hr != 1:
+                print(f"     自动检测表头行: 第 {hr} 行")
+
+        col_map = find_column_indices(ws, column_names, header_row=hr)
         if not col_map:
             print(f"     跳过（未找到匹配列）")
             continue
@@ -324,9 +389,9 @@ def process_file(filepath, config, input_dir=None):
                 col_idx, matched_header = col_map[cn]
                 col_rule_map[col_idx] = (rule["strategy"], rule.get("options", {}))
 
-        # 逐行处理（从第 2 行开始，跳过表头）
+        # 逐行处理（表头之后开始）
         row_count = 0
-        for row in ws.iter_rows(min_row=2, values_only=False):
+        for row in ws.iter_rows(min_row=hr + 1, values_only=False):
             row_count += 1
             any_change = False
             for cell in row:
@@ -420,6 +485,8 @@ def main():
     print(f"  输入目录:  {os.path.abspath(input_dir)}")
     print(f"  输出目录:  {os.path.abspath(output_dir)}")
     print(f"  文件后缀:  {config.get('suffix', '_masked')}")
+    hr_display = config.get('header_row', 1)
+    print(f"  表头行:    {hr_display}")
     print(f"  脱敏规则:")
     for rule in config.get("rules", []):
         opts = rule.get("options", {})
